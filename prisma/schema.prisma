@@ -1,0 +1,121 @@
+// Lead Finder Pro — Prisma schema (SQLite, single-user, no auth)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Core business records returned from provider searches / website scans
+// ---------------------------------------------------------------------------
+model Business {
+  id             String   @id @default(cuid())
+  name           String
+  category       String?
+  address        String?
+  city           String?
+  state          String?
+  country        String?
+  lat            Float?
+  lng            Float?
+  website        String?
+  websiteStatus  String   @default("unknown") // active | inactive | none | unknown
+  phone          String?
+  email          String?
+  // SQLite has no native list/scalar-array type → store JSON string
+  socialLinks    String?  // JSON: { facebook?, twitter?, instagram?, linkedin?, youtube? }
+  dataSource     String   @default("openstreetmap")
+  lastUpdated    DateTime @default(now())
+
+  projectId      String?
+  project        Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  searchHistoryId String?
+  searchHistory  SearchHistory? @relation(fields: [searchHistoryId], references: [id], onDelete: SetNull)
+
+  // Dedup helper: provider + name + (city||lat/lng) composite uniqueness is
+  // hard in SQLite; we use a computed hashKey for dedup detection at app layer.
+  hashKey        String?  @unique
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([city])
+  @@index([category])
+  @@index([searchHistoryId])
+}
+
+// ---------------------------------------------------------------------------
+// Projects — user-curated collections of saved businesses
+// ---------------------------------------------------------------------------
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  color       String?  // optional accent for UI
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  businesses  Business[]
+}
+
+// ---------------------------------------------------------------------------
+// Search history — every executed search is auto-logged
+// ---------------------------------------------------------------------------
+model SearchHistory {
+  id           String   @id @default(cuid())
+  keyword      String?
+  category     String?
+  city         String?
+  state        String?
+  country      String?
+  radius       Int?     // meters
+  provider     String?
+  totalResults Int      @default(0)
+  date         DateTime @default(now())
+
+  businesses Business[]
+}
+
+// ---------------------------------------------------------------------------
+// Settings — provider API keys + enabled flags (managed via Settings page)
+// ---------------------------------------------------------------------------
+model Setting {
+  id             String   @id @default(cuid())
+  provider       String   @unique // openstreetmap | geoapify | foursquare | tomtom | nominatim
+  apiKey         String?
+  enabled        Boolean  @default(true)
+  lastTested     DateTime?
+  lastTestResult String?  // success | error:<msg>
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Export history — every export operation is logged
+// ---------------------------------------------------------------------------
+model ExportHistory {
+  id        String   @id @default(cuid())
+  format    String   // csv | xlsx | json
+  count     Int      @default(0)
+  filename  String
+  filter    String?  // JSON description of the filter used
+  projectId String?
+  date      DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Application logs — diagnostic trail for searches/scans/exports
+// ---------------------------------------------------------------------------
+model Log {
+  id        String   @id @default(cuid())
+  level     String   @default("info") // info | warn | error
+  category  String?  // search | scan | export | settings | system
+  message   String
+  meta      String?  // JSON string of extra context
+  timestamp DateTime @default(now())
+}
