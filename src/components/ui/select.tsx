@@ -112,11 +112,11 @@ function SelectItem({
       )}
       {...props}
     >
-      <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
-          <CheckIcon className="size-4" />
-        </SelectPrimitive.ItemIndicator>
-      </span>
+      {/* Indicator container only renders when this item is selected,
+          so non-selected items no longer show an empty transparent box. */}
+      <SelectPrimitive.ItemIndicator className="absolute right-2 flex size-3.5 items-center justify-center">
+        <CheckIcon className="size-4" />
+      </SelectPrimitive.ItemIndicator>
       <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
     </SelectPrimitive.Item>
   )

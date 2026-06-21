@@ -174,3 +174,18 @@ Work Log:
 
 Stage Summary:
 - Search form now shows Country first, then State, then City — as requested.
+
+---
+Task ID: 17
+Agent: main
+Task: Fix provider dropdown — remove transparent round shape showing on non-selected items.
+
+Work Log:
+- Root cause: src/components/ui/select.tsx SelectItem always rendered a wrapper `<span class="absolute right-2 flex size-3.5 items-center justify-center">` containing the ItemIndicator. For non-selected items this wrapper was an empty 14px transparent box positioned on the right side of every row — appearing as the "round transparent shape" the user reported.
+- Fix: moved the absolute-positioning classes directly onto `<SelectPrimitive.ItemIndicator>`. Since ItemIndicator only renders when an item IS selected, the 14px container no longer exists for non-selected items.
+- Verified via DOM inspection: before fix all 5 items had `emptyAbsoluteSpans: 1`; after fix non-selected items have `emptyAbsoluteSpans: 0` (only the selected item renders the indicator, which contains the checkmark icon).
+- VLM confirms: "No empty transparent boxes/circles/shapes on the right of non-selected rows; the unwanted empty container is gone."
+- Lint clean.
+
+Stage Summary:
+- Provider dropdown (and all other Select dropdowns app-wide) no longer shows the transparent empty shape on non-selected items.
