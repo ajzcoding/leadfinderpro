@@ -161,3 +161,16 @@ Stage Summary:
   3. ✅ Cybersecurity bugs fixed (input validation, SSRF, key masking, path safety)
   4. ✅ Light theme made more attractive (gradients, depth, refined cards)
   5. ✅ GitHub README.md created with step-by-step install + LICENSE + .env.example + .gitignore
+
+---
+Task ID: 16
+Agent: main
+Task: Reorder Search form fields so Country, State, City come first.
+
+Work Log:
+- In src/components/views/search-view.tsx, reordered the Location grid from (City, State, Country) to (Country, State, City).
+- Verified via Agent Browser: textbox order is now Country → State / Region → City, followed by Category, Keyword, Provider, Project.
+- Lint clean.
+
+Stage Summary:
+- Search form now shows Country first, then State, then City — as requested.

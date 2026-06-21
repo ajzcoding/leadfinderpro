@@ -156,12 +156,12 @@ export function SearchView() {
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="space-y-1.5">
-                <Label htmlFor="city" className="text-xs">City</Label>
+                <Label htmlFor="country" className="text-xs">Country</Label>
                 <Input
-                  id="city"
-                  placeholder="e.g. Berlin"
-                  value={form.city ?? ""}
-                  onChange={(e) => set("city", e.target.value)}
+                  id="country"
+                  placeholder="e.g. Germany"
+                  value={form.country ?? ""}
+                  onChange={(e) => set("country", e.target.value)}
                 />
               </div>
               <div className="space-y-1.5">
@@ -174,12 +174,12 @@ export function SearchView() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="country" className="text-xs">Country</Label>
+                <Label htmlFor="city" className="text-xs">City</Label>
                 <Input
-                  id="country"
-                  placeholder="e.g. Germany"
-                  value={form.country ?? ""}
-                  onChange={(e) => set("country", e.target.value)}
+                  id="city"
+                  placeholder="e.g. Berlin"
+                  value={form.city ?? ""}
+                  onChange={(e) => set("city", e.target.value)}
                 />
               </div>
             </div>
