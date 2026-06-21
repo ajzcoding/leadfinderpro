@@ -2,10 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toBusinessRecord } from "@/lib/mappers";
 import { scanWebsite } from "@/lib/scan/scanner";
+import {
+  isValidId,
+  sanitizeText,
+  safePublicUrl,
+} from "@/lib/security";
 import type { ResultFilter } from "@/lib/types";
 
+const ALLOWED_STATUS = ["active", "inactive", "none", "unknown"] as const;
+
 function buildWhere(filter: ResultFilter = {}) {
-  const where: Record<string, unknown> = { AND: [] as unknown[] };
   const and: unknown[] = [];
   if (filter.websiteAvailable === true) and.push({ website: { not: null } });
   if (filter.websiteAvailable === false) and.push({ website: null });
@@ -27,23 +33,21 @@ function buildWhere(filter: ResultFilter = {}) {
       ],
     });
   }
-  where.AND = and;
-  return where;
+  return { AND: and };
 }
 
 /**
- * GET /api/business?filter=<json>&page=&pageSize=
+ * GET /api/business?page=&pageSize=&<filters>
  * Returns a paginated list of businesses matching the filter.
+ * All query params are validated + bounded.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
+  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
   const pageSize = Math.min(
     200,
-    Math.max(1, parseInt(searchParams.get("pageSize") ?? "50", 10)),
+    Math.max(1, parseInt(searchParams.get("pageSize") ?? "50", 10) || 50),
   );
-  const projectId = searchParams.get("projectId");
-  const searchHistoryId = searchParams.get("searchHistoryId");
 
   const filter: ResultFilter = {};
   const fa = searchParams.get("websiteAvailable");
@@ -55,12 +59,18 @@ export async function GET(req: NextRequest) {
   const pa = searchParams.get("phoneAvailable");
   if (pa === "true") filter.phoneAvailable = true;
   if (pa === "false") filter.phoneAvailable = false;
-  if (searchParams.get("category")) filter.category = searchParams.get("category");
-  if (searchParams.get("city")) filter.city = searchParams.get("city");
-  if (searchParams.get("state")) filter.state = searchParams.get("state");
-  if (searchParams.get("search")) filter.search = searchParams.get("search");
-  if (projectId) filter.projectId = projectId;
-  if (searchHistoryId) filter.searchHistoryId = searchHistoryId;
+
+  // Validate ids before using them in queries.
+  const projectId = searchParams.get("projectId");
+  if (projectId && isValidId(projectId)) filter.projectId = projectId;
+  const searchHistoryId = searchParams.get("searchHistoryId");
+  if (searchHistoryId && isValidId(searchHistoryId)) filter.searchHistoryId = searchHistoryId;
+
+  // Sanitize free-text filters.
+  filter.category = sanitizeText(searchParams.get("category"), 60) ?? null;
+  filter.city = sanitizeText(searchParams.get("city"), 120) ?? null;
+  filter.state = sanitizeText(searchParams.get("state"), 120) ?? null;
+  filter.search = sanitizeText(searchParams.get("search"), 100) ?? null;
 
   const where = buildWhere(filter);
   const [total, rows] = await Promise.all([
@@ -87,34 +97,78 @@ export async function GET(req: NextRequest) {
  * Update a business (assign to project, manual edits, etc.)
  */
 export async function PATCH(req: NextRequest) {
-  const body = await req.json();
-  const { id, ...rest } = body as {
-    id: string;
-    projectId?: string | null;
-    websiteStatus?: string;
-    email?: string;
-    phone?: string;
-    socialLinks?: Record<string, string>;
-  };
-  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const id = body.id;
+  if (typeof id !== "string" || !isValidId(id)) {
+    return NextResponse.json({ error: "valid id required" }, { status: 400 });
+  }
+
   const data: Record<string, unknown> = {};
-  if (rest.projectId !== undefined) data.projectId = rest.projectId || null;
-  if (rest.websiteStatus !== undefined) data.websiteStatus = rest.websiteStatus;
-  if (rest.email !== undefined) data.email = rest.email;
-  if (rest.phone !== undefined) data.phone = rest.phone;
-  if (rest.socialLinks !== undefined) data.socialLinks = JSON.stringify(rest.socialLinks);
-  const updated = await db.business.update({ where: { id }, data });
-  return NextResponse.json(toBusinessRecord(updated));
+  if (body.projectId !== undefined) {
+    // null or a valid id only
+    data.projectId =
+      body.projectId === null || body.projectId === ""
+        ? null
+        : typeof body.projectId === "string" && isValidId(body.projectId)
+          ? body.projectId
+          : undefined;
+    if (data.projectId === undefined) {
+      return NextResponse.json({ error: "invalid projectId" }, { status: 400 });
+    }
+  }
+  if (body.websiteStatus !== undefined) {
+    if (!ALLOWED_STATUS.includes(body.websiteStatus as (typeof ALLOWED_STATUS)[number])) {
+      return NextResponse.json({ error: "invalid websiteStatus" }, { status: 400 });
+    }
+    data.websiteStatus = body.websiteStatus;
+  }
+  if (body.email !== undefined) {
+    const email = sanitizeText(body.email, 254);
+    data.email = email && email.includes("@") ? email : null;
+  }
+  if (body.phone !== undefined) {
+    data.phone = sanitizeText(body.phone, 40);
+  }
+  if (body.socialLinks !== undefined) {
+    if (typeof body.socialLinks !== "object" || body.socialLinks === null) {
+      return NextResponse.json({ error: "socialLinks must be an object" }, { status: 400 });
+    }
+    // Validate each social link is a safe http(s) URL.
+    const socials = body.socialLinks as Record<string, unknown>;
+    const cleaned: Record<string, string> = {};
+    for (const [k, v] of Object.entries(socials)) {
+      if (typeof k !== "string" || k.length > 30) continue;
+      const url = safePublicUrl(String(v));
+      if (url) cleaned[k] = url;
+    }
+    data.socialLinks = Object.keys(cleaned).length ? JSON.stringify(cleaned) : null;
+  }
+
+  try {
+    const updated = await db.business.update({ where: { id }, data });
+    return NextResponse.json(toBusinessRecord(updated));
+  } catch {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
 }
 
-/**
- * DELETE /api/business?id=<id>
- */
+/** DELETE /api/business?id=<id> */
 export async function DELETE(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const id = searchParams.get("id");
-  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
-  await db.business.delete({ where: { id } });
+  if (!id || !isValidId(id)) {
+    return NextResponse.json({ error: "valid id required" }, { status: 400 });
+  }
+  try {
+    await db.business.delete({ where: { id } });
+  } catch {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
   return NextResponse.json({ ok: true });
 }
 
@@ -123,26 +177,41 @@ export async function DELETE(req: NextRequest) {
  * Re-scan a single business website for public contact info.
  */
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  if (body.action === "scan" && body.id) {
-    const b = await db.business.findUnique({ where: { id: body.id } });
-    if (!b) return NextResponse.json({ error: "not found" }, { status: 404 });
-    if (!b.website)
-      return NextResponse.json({ error: "no website to scan" }, { status: 400 });
-    const scan = await scanWebsite(b.website);
-    const existingSocials = b.socialLinks ? JSON.parse(b.socialLinks) : {};
-    const socials = { ...existingSocials, ...scan.socials };
-    const updated = await db.business.update({
-      where: { id: b.id },
-      data: {
-        websiteStatus: scan.active ? "active" : "inactive",
-        email: b.email ?? scan.emails[0] ?? null,
-        phone: b.phone ?? scan.phones[0] ?? null,
-        socialLinks: Object.keys(socials).length ? JSON.stringify(socials) : null,
-        lastUpdated: new Date(),
-      },
-    });
-    return NextResponse.json(toBusinessRecord(updated));
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  return NextResponse.json({ error: "unsupported action" }, { status: 400 });
+  if (body.action !== "scan" || typeof body.id !== "string" || !isValidId(body.id)) {
+    return NextResponse.json({ error: "unsupported action" }, { status: 400 });
+  }
+  const b = await db.business.findUnique({ where: { id: body.id } });
+  if (!b) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // Re-validate the stored website URL (SSRF safety) before scanning.
+  const safeUrl = safePublicUrl(b.website ?? "");
+  if (!safeUrl) {
+    return NextResponse.json({ error: "no safe website to scan" }, { status: 400 });
+  }
+  const scan = await scanWebsite(safeUrl);
+  let existingSocials: Record<string, string> = {};
+  if (b.socialLinks) {
+    try {
+      existingSocials = JSON.parse(b.socialLinks) as Record<string, string>;
+    } catch {
+      existingSocials = {};
+    }
+  }
+  const socials = { ...existingSocials, ...scan.socials };
+  const updated = await db.business.update({
+    where: { id: b.id },
+    data: {
+      websiteStatus: scan.active ? "active" : "inactive",
+      email: b.email ?? scan.emails[0] ?? null,
+      phone: b.phone ?? scan.phones[0] ?? null,
+      socialLinks: Object.keys(socials).length ? JSON.stringify(socials) : null,
+      lastUpdated: new Date(),
+    },
+  });
+  return NextResponse.json(toBusinessRecord(updated));
 }

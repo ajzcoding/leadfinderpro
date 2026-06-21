@@ -4,36 +4,69 @@ import { runSearch } from "@/lib/providers";
 import { scanWebsite } from "@/lib/scan/scanner";
 import { toBusinessRecord, hashBusiness } from "@/lib/mappers";
 import { log } from "@/lib/logging";
-import type { SearchParams } from "@/lib/types";
+import {
+  sanitizeText,
+  sanitizeRadius,
+  sanitizeLimit,
+  isValidId,
+} from "@/lib/security";
 
 export const maxDuration = 120;
 
 /**
  * POST /api/search
- * Body: SearchParams
+ * Body: SearchParams (validated + sanitized)
  *
  * Executes a provider search, persists businesses (deduping by hash), records
  * search history, and (optionally) scans each website for public contact info.
  */
 export async function POST(req: NextRequest) {
-  let body: SearchParams;
+  let raw: unknown;
   try {
-    body = (await req.json()) as SearchParams;
+    raw = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+  if (!raw || typeof raw !== "object") {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
 
-  const { records, center, provider } = await runSearch(body);
+  // --- Validate + sanitize every input field ---
+  const body = raw as Record<string, unknown>;
+  const params = {
+    country: sanitizeText(body.country),
+    state: sanitizeText(body.state),
+    city: sanitizeText(body.city),
+    category: sanitizeText(body.category, 60),
+    keyword: sanitizeText(body.keyword, 100),
+    radius: sanitizeRadius(body.radius),
+    provider: body.provider, // validated inside runSearch
+    limit: sanitizeLimit(body.limit),
+    scanWebsites: body.scanWebsites === true,
+    projectId:
+      typeof body.projectId === "string" && isValidId(body.projectId)
+        ? body.projectId
+        : null,
+  };
+
+  // Require at least one location field or a keyword.
+  if (!params.country && !params.state && !params.city && !params.keyword) {
+    return NextResponse.json(
+      { error: "Provide at least a location or a keyword to search." },
+      { status: 400 },
+    );
+  }
+
+  const { records, center, provider } = await runSearch(params);
   if (!records.length) {
-    // Still log an empty search to history for completeness.
     const sh = await db.searchHistory.create({
       data: {
-        keyword: body.keyword ?? null,
-        category: body.category ?? null,
-        city: body.city ?? null,
-        state: body.state ?? null,
-        country: body.country ?? null,
-        radius: body.radius ?? null,
+        keyword: params.keyword,
+        category: params.category,
+        city: params.city,
+        state: params.state,
+        country: params.country,
+        radius: params.radius,
         provider: provider ?? null,
         totalResults: 0,
       },
@@ -51,24 +84,33 @@ export async function POST(req: NextRequest) {
   // Persist search history first.
   const searchHistory = await db.searchHistory.create({
     data: {
-      keyword: body.keyword ?? null,
-      category: body.category ?? null,
-      city: body.city ?? center?.city ?? null,
-      state: body.state ?? center?.state ?? null,
-      country: body.country ?? center?.country ?? null,
-      radius: body.radius ?? null,
+      keyword: params.keyword,
+      category: params.category,
+      city: params.city ?? center?.city ?? null,
+      state: params.state ?? center?.state ?? null,
+      country: params.country ?? center?.country ?? null,
+      radius: params.radius,
       provider: provider ?? null,
       totalResults: records.length,
     },
   });
 
-  // Upsert businesses (dedup by hashKey). On conflict, refresh contact fields
-  // if we have new data and optionally re-link to the new search history.
+  // Upsert businesses (dedup by hashKey).
   const saved: ReturnType<typeof toBusinessRecord>[] = [];
   for (const r of records) {
     const hash = hashBusiness(r);
     const existing = await db.business.findUnique({ where: { hashKey: hash } });
     if (existing) {
+      // Merge socialLinks safely (both sides are already JSON strings).
+      let mergedSocials = existing.socialLinks;
+      if (r.socialLinks && Object.keys(r.socialLinks).length) {
+        try {
+          const prev = existing.socialLinks ? JSON.parse(existing.socialLinks) : {};
+          mergedSocials = JSON.stringify({ ...prev, ...r.socialLinks });
+        } catch {
+          mergedSocials = JSON.stringify(r.socialLinks);
+        }
+      }
       const updated = await db.business.update({
         where: { id: existing.id },
         data: {
@@ -76,11 +118,9 @@ export async function POST(req: NextRequest) {
           websiteStatus: r.websiteStatus ?? existing.websiteStatus,
           phone: r.phone ?? existing.phone,
           email: r.email ?? existing.email,
-          socialLinks: r.socialLinks && Object.keys(r.socialLinks).length
-            ? JSON.stringify({ ...JSON.parse(existing.socialLinks ?? "{}"), ...r.socialLinks })
-            : existing.socialLinks,
+          socialLinks: mergedSocials,
           lastUpdated: new Date(),
-          projectId: body.projectId ?? existing.projectId,
+          projectId: params.projectId ?? existing.projectId,
           searchHistoryId: searchHistory.id,
         },
       });
@@ -100,12 +140,13 @@ export async function POST(req: NextRequest) {
           websiteStatus: r.websiteStatus,
           phone: r.phone,
           email: r.email,
-          socialLinks: r.socialLinks && Object.keys(r.socialLinks).length
-            ? JSON.stringify(r.socialLinks)
-            : null,
+          socialLinks:
+            r.socialLinks && Object.keys(r.socialLinks).length
+              ? JSON.stringify(r.socialLinks)
+              : null,
           dataSource: r.dataSource,
           hashKey: hash,
-          projectId: body.projectId ?? null,
+          projectId: params.projectId ?? null,
           searchHistoryId: searchHistory.id,
         },
       });
@@ -113,8 +154,8 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Optional website scanning.
-  if (body.scanWebsites) {
+  // Optional website scanning (SSRF-safe URLs already enforced upstream).
+  if (params.scanWebsites) {
     await log("info", "search", `Scanning ${saved.length} websites…`);
     for (const b of saved) {
       if (!b.website) continue;
@@ -133,7 +174,9 @@ export async function POST(req: NextRequest) {
         });
         Object.assign(b, toBusinessRecord(updated));
       } catch (err) {
-        await log("warn", "scan", `Scan failed for ${b.website}`, { error: String(err) });
+        await log("warn", "scan", `Scan failed for ${b.website}`, {
+          error: String(err),
+        });
       }
     }
   }

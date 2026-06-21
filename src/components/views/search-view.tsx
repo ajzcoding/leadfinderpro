@@ -42,6 +42,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   geoapify: "Geoapify Places",
   foursquare: "Foursquare Places",
   tomtom: "TomTom Search",
+  googlemaps: "Google Maps Places",
 };
 
 const PROGRESS_STAGES = [
@@ -121,7 +122,7 @@ export function SearchView() {
     ];
     const cfg: Record<string, { hasKey: boolean; enabled: boolean; requiresKey: boolean }> = {};
     for (const s of settings ?? []) cfg[s.provider] = { hasKey: s.hasKey, enabled: s.enabled, requiresKey: s.requiresKey };
-    for (const p of ["geoapify", "foursquare", "tomtom"] as ProviderId[]) {
+    for (const p of ["geoapify", "foursquare", "tomtom", "googlemaps"] as ProviderId[]) {
       const c = cfg[p];
       const ready = c && c.enabled && c.hasKey;
       list.push({

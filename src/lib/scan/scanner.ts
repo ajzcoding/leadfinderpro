@@ -1,4 +1,5 @@
 import { log } from "@/lib/logging";
+import { safePublicUrl } from "@/lib/security";
 import type { SocialLinks } from "@/lib/types";
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -160,9 +161,16 @@ export async function scanWebsite(rawUrl: string): Promise<ScanResult> {
     socials: {},
     finalUrl: null,
   };
+  // SSRF protection: only scan public http(s) URLs (blocks loopback, private
+  // ranges, link-local, and cloud metadata endpoints).
+  const safeUrl = safePublicUrl(rawUrl);
+  if (!safeUrl) {
+    await log("warn", "scan", `Refused to scan non-public URL: ${rawUrl}`);
+    return result;
+  }
   let url: URL;
   try {
-    url = new URL(rawUrl.startsWith("http") ? rawUrl : "https://" + rawUrl);
+    url = new URL(safeUrl);
   } catch {
     return result;
   }

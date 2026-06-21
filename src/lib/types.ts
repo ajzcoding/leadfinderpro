@@ -5,7 +5,8 @@ export type ProviderId =
   | "nominatim"
   | "geoapify"
   | "foursquare"
-  | "tomtom";
+  | "tomtom"
+  | "googlemaps";
 
 export interface ProviderMeta {
   id: ProviderId;
@@ -61,6 +62,15 @@ export const PROVIDERS: ProviderMeta[] = [
     description:
       "TomTom Search API for category-based POI (points of interest) discovery with global coverage.",
     docsUrl: "https://developer.tomtom.com/search-api/documentation/search-information/poi-search",
+  },
+  {
+    id: "googlemaps",
+    name: "Google Maps Places",
+    requiresKey: true,
+    free: false,
+    description:
+      "Google Maps Places API (Nearby Search). Industry-leading business data with ratings, hours & contact info. Requires a Google Maps API key with Places API enabled. Usage billed per request — see Google's pricing.",
+    docsUrl: "https://developers.google.com/maps/documentation/places/web-service/search-nearby",
   },
 ];
 

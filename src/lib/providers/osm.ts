@@ -1,6 +1,11 @@
 import { log } from "@/lib/logging";
 import type { BusinessRecord, SocialLinks } from "@/lib/types";
 
+// Module-level cache of the last Overpass endpoint that responded
+// successfully. This prevents the first search of every session from being
+// wasted on a rate-limited/dead mirror.
+let lastWorkingEndpoint: string | null = null;
+
 // Map app category slugs → OSM tag filters used in the Overpass query.
 const CATEGORY_OSM: Record<string, string[]> = {
   restaurant: ['["amenity"="restaurant"]', '["amenity"="fast_food"]'],
@@ -103,21 +108,32 @@ export async function searchOverpass(params: {
 
   const query = `[out:json][timeout:25];(${selectors.join("")});out center tags ${limit};`;
 
-  // Public Overpass mirrors. The official endpoint is heavily rate-limited, so
-  // we round-robin across several community mirrors + retry once on 429.
-  const endpoints = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
+  // Public Overpass mirrors, ordered by measured reliability/latency.
+  // `overpass-api.de` is the official endpoint but is heavily rate-limited;
+  // `maps.mail.ru` and `overpass.osm.ch` are fast community mirrors that
+  // rarely return 429. We try them in order and remember the last working one
+  // for the next search (so the first call isn't wasted on a dead mirror).
+  const ALL_ENDPOINTS = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
   ];
+  // Prefer the endpoint that worked last time, then fall back to the rest.
+  const endpoints = lastWorkingEndpoint
+    ? [lastWorkingEndpoint, ...ALL_ENDPOINTS.filter((e) => e !== lastWorkingEndpoint)]
+    : ALL_ENDPOINTS;
 
   let data: { elements?: OverpassElement[] } | null = null;
   let lastErr: unknown = null;
-  // First pass: try each endpoint once. Second pass: a single retry after a
-  // short backoff (helps recover from transient 429s).
+  // Try each endpoint once; on a 429 (rate limit) wait briefly then move on.
+  // If everything fails, do one final retry pass with a longer backoff.
   for (let attempt = 0; attempt < 2 && !data; attempt++) {
-    if (attempt === 1) await new Promise((r) => setTimeout(r, 1500));
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, 2500));
+      await log("warn", "search", "Overpass first pass failed — retrying after backoff");
+    }
     for (const ep of endpoints) {
       try {
         const res = await fetch(ep, {
@@ -125,16 +141,20 @@ export async function searchOverpass(params: {
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "LeadFinderPro/1.0 (personal-use lead finder)",
+            Accept: "application/json",
           },
           body: "data=" + encodeURIComponent(query),
           cache: "no-store",
-          signal: AbortSignal.timeout(30000),
+          signal: AbortSignal.timeout(25000),
         });
         if (!res.ok) {
           lastErr = new Error(`Overpass ${ep} HTTP ${res.status}`);
+          // On 429, wait a bit before trying the next mirror.
+          if (res.status === 429) await new Promise((r) => setTimeout(r, 800));
           continue;
         }
         data = (await res.json()) as { elements?: OverpassElement[] };
+        lastWorkingEndpoint = ep; // remember for next time
         break;
       } catch (err) {
         lastErr = err;

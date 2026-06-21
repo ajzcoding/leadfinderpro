@@ -3,9 +3,17 @@ import { db } from "@/lib/db";
 import { testProvider } from "@/lib/providers";
 import { recordTestResult } from "@/lib/settings-store";
 import { PROVIDERS, type ProviderId } from "@/lib/types";
+import {
+  isValidProvider,
+  isValidSettingsAction,
+  sanitizeApiKey,
+} from "@/lib/security";
 
 /**
  * GET /api/settings → list provider configs (API key masked)
+ *
+ * API keys are NEVER returned to the client in plaintext — only a masked
+ * preview (first 4 + •••• + last 4). The full key lives only in SQLite.
  */
 export async function GET() {
   const rows = await db.setting.findMany();
@@ -22,9 +30,8 @@ export async function GET() {
         description: p.description,
         docsUrl: p.docsUrl,
         hasKey: !!row?.apiKey,
-        // mask: never return the raw key to the client
         apiKeyMasked: row?.apiKey ? maskKey(row.apiKey) : null,
-        enabled: row?.enabled ?? p.free, // free providers default to enabled
+        enabled: row?.enabled ?? p.free,
         lastTested: row?.lastTested?.toISOString() ?? null,
         lastTestResult: row?.lastTestResult ?? null,
       };
@@ -40,58 +47,96 @@ function maskKey(k: string): string {
 /**
  * POST /api/settings
  * { provider, action: "save"|"test"|"delete"|"toggle", apiKey?, enabled? }
+ *
+ * All inputs validated + bounded. API keys are sanitized to a strict
+ * character set + length range before storage.
  */
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const provider = body.provider as ProviderId;
-  if (!provider) return NextResponse.json({ error: "provider required" }, { status: 400 });
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (!raw || typeof raw !== "object") {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const body = raw as Record<string, unknown>;
 
-  if (body.action === "save") {
-    const existing = await db.setting.findUnique({ where: { provider } });
+  const provider = body.provider;
+  if (!isValidProvider(provider)) {
+    return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
+  }
+  const action = body.action;
+  if (!isValidSettingsAction(action)) {
+    return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  }
+  const p = provider as ProviderId;
+
+  if (action === "save") {
+    // API key: validate format if provided. null/empty clears it.
+    let apiKey: string | null = null;
+    if (body.apiKey != null && body.apiKey !== "") {
+      apiKey = sanitizeApiKey(body.apiKey);
+      if (!apiKey) {
+        return NextResponse.json(
+          { error: "API key format is invalid (8–512 chars, alphanumerics + _-.+=:@)." },
+          { status: 400 },
+        );
+      }
+    }
+    const enabled = body.enabled === true;
+    const existing = await db.setting.findUnique({ where: { provider: p } });
     if (existing) {
       const updated = await db.setting.update({
-        where: { provider },
-        data: { apiKey: body.apiKey ?? null, enabled: body.enabled ?? existing.enabled },
+        where: { provider: p },
+        data: {
+          apiKey: apiKey ?? existing.apiKey,
+          enabled: body.enabled === undefined ? existing.enabled : enabled,
+        },
       });
       return NextResponse.json({ ok: true, provider: updated.provider });
     }
     const created = await db.setting.create({
-      data: { provider, apiKey: body.apiKey ?? null, enabled: body.enabled ?? true },
+      data: { provider: p, apiKey, enabled: body.enabled === undefined ? true : enabled },
     });
     return NextResponse.json({ ok: true, provider: created.provider });
   }
 
-  if (body.action === "delete") {
-    await db.setting.deleteMany({ where: { provider } });
+  if (action === "delete") {
+    await db.setting.deleteMany({ where: { provider: p } });
     return NextResponse.json({ ok: true });
   }
 
-  if (body.action === "toggle") {
-    const existing = await db.setting.findUnique({ where: { provider } });
+  if (action === "toggle") {
+    const enabled = body.enabled === true;
+    const existing = await db.setting.findUnique({ where: { provider: p } });
     if (existing) {
       await db.setting.update({
-        where: { provider },
-        data: { enabled: body.enabled ?? !existing.enabled },
+        where: { provider: p },
+        data: { enabled: body.enabled === undefined ? !existing.enabled : enabled },
       });
     } else {
       await db.setting.create({
-        data: { provider, apiKey: null, enabled: body.enabled ?? true },
+        data: { provider: p, apiKey: null, enabled: body.enabled === undefined ? true : enabled },
       });
     }
     return NextResponse.json({ ok: true });
   }
 
-  if (body.action === "test") {
-    // For keyed providers, test with the provided key OR the stored one.
-    let key = body.apiKey as string | undefined;
+  // action === "test"
+  let key: string | null = null;
+  if (body.apiKey != null && body.apiKey !== "") {
+    key = sanitizeApiKey(body.apiKey);
     if (!key) {
-      const row = await db.setting.findUnique({ where: { provider } });
-      key = row?.apiKey ?? undefined;
+      return NextResponse.json({ ok: false, message: "Invalid API key format" }, { status: 400 });
     }
-    const result = await testProvider(provider, key ?? null);
-    await recordTestResult(provider, result.ok, result.message);
-    return NextResponse.json(result);
   }
-
-  return NextResponse.json({ error: "unsupported action" }, { status: 400 });
+  if (!key) {
+    const row = await db.setting.findUnique({ where: { provider: p } });
+    key = row?.apiKey ?? null;
+  }
+  const result = await testProvider(p, key);
+  await recordTestResult(p, result.ok, result.message);
+  return NextResponse.json(result);
 }

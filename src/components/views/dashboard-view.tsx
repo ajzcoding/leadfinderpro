@@ -13,6 +13,7 @@ import {
   ArrowRight,
   MapPin,
   Loader2,
+  Search as SearchIcon,
 } from "lucide-react";
 import { fetchDashboard } from "@/lib/api-client";
 import { StatCard } from "@/components/stat-card";
@@ -37,10 +38,20 @@ export function DashboardView() {
   return (
     <div className="space-y-6">
       {/* Hero */}
-      <Card className="border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
-        <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">
+      <Card className="relative overflow-hidden border-primary/20">
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-emerald-500/5 to-transparent" />
+        <div className="absolute -right-8 -top-8 h-40 w-40 rounded-full bg-primary/10 blur-2xl" />
+        <div className="absolute -bottom-12 left-1/3 h-32 w-32 rounded-full bg-emerald-400/10 blur-3xl" />
+        <CardContent className="relative flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-7">
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-semibold text-primary ring-1 ring-primary/20">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
+              </span>
+              Personal Edition
+            </div>
+            <h2 className="text-2xl font-bold tracking-tight">
               Welcome to Lead Finder Pro
             </h2>
             <p className="max-w-2xl text-sm text-muted-foreground">
@@ -49,7 +60,8 @@ export function DashboardView() {
               launches straight to your dashboard.
             </p>
           </div>
-          <Button className="gap-2 shrink-0" onClick={() => setView("search")}>
+          <Button className="gap-2 shrink-0 shadow-sm" size="lg" onClick={() => setView("search")}>
+            <SearchIcon className="h-4 w-4" />
             Start a Search
             <ArrowRight className="h-4 w-4" />
           </Button>

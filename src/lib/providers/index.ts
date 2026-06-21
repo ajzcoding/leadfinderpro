@@ -3,6 +3,7 @@ import { searchOverpass } from "@/lib/providers/osm";
 import { searchGeoapify } from "@/lib/providers/geoapify";
 import { searchFoursquare } from "@/lib/providers/foursquare";
 import { searchTomtom } from "@/lib/providers/tomtom";
+import { searchGoogleMaps } from "@/lib/providers/googlemaps";
 import { getApiKey, isProviderEnabled } from "@/lib/settings-store";
 import { log } from "@/lib/logging";
 import type { BusinessRecord, ProviderId, SearchParams } from "@/lib/types";
@@ -67,10 +68,9 @@ export async function runSearch(
   // Decide which provider to actually use based on config + keys.
   let provider: ProviderId = requested;
   const enabled = await isProviderEnabled(requested);
-  const key = ["geoapify", "foursquare", "tomtom"].includes(requested)
-    ? await getApiKey(requested)
-    : null;
-  if (["geoapify", "foursquare", "tomtom"].includes(requested) && (!enabled || !key)) {
+  const KEYED_PROVIDERS: ProviderId[] = ["geoapify", "foursquare", "tomtom", "googlemaps"];
+  const key = KEYED_PROVIDERS.includes(requested) ? await getApiKey(requested) : null;
+  if (KEYED_PROVIDERS.includes(requested) && (!enabled || !key)) {
     await log(
       "warn",
       "search",
@@ -121,6 +121,16 @@ export async function runSearch(
       });
     } else if (provider === "tomtom" && key) {
       records = await searchTomtom({
+        lat: point.lat,
+        lng: point.lng,
+        radius,
+        category: params.category,
+        keyword: params.keyword,
+        limit: params.limit,
+        apiKey: key,
+      });
+    } else if (provider === "googlemaps" && key) {
+      records = await searchGoogleMaps({
         lat: point.lat,
         lng: point.lng,
         radius,
@@ -188,6 +198,35 @@ export async function testProvider(
         { cache: "no-store" },
       );
       return { ok: res.ok, message: res.ok ? "TomTom key valid" : `HTTP ${res.status}` };
+    }
+    if (provider === "googlemaps") {
+      const res = await fetch(
+        "https://places.googleapis.com/v1/places:searchNearby",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": apiKey,
+            "X-Goog-FieldMask": "places.id",
+          },
+          body: JSON.stringify({
+            includedTypes: ["restaurant"],
+            maxResultCount: 1,
+            locationRestriction: {
+              circle: {
+                center: { latitude: 52.52, longitude: 13.405 },
+                radius: 1000,
+              },
+            },
+          }),
+          cache: "no-store",
+          signal: AbortSignal.timeout(15000),
+        },
+      );
+      return {
+        ok: res.ok,
+        message: res.ok ? "Google Places key valid" : `HTTP ${res.status}`,
+      };
     }
     return { ok: false, message: "Unknown provider" };
   } catch (err) {

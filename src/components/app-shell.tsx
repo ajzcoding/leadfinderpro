@@ -78,8 +78,9 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
 function SidebarBrand() {
   return (
     <div className="flex items-center gap-2.5 px-2 py-1">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+      <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-emerald-600 text-primary-foreground shadow-md shadow-primary/30">
         <Crosshair className="h-5 w-5" />
+        <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-sidebar" />
       </div>
       <div className="flex flex-col leading-tight">
         <span className="text-sm font-bold tracking-tight">Lead Finder Pro</span>
