@@ -6,6 +6,7 @@ import {
   isValidId,
   sanitizeText,
   safePublicUrl,
+  readJsonBody,
 } from "@/lib/security";
 import type { ResultFilter } from "@/lib/types";
 
@@ -97,12 +98,11 @@ export async function GET(req: NextRequest) {
  * Update a business (assign to project, manual edits, etc.)
  */
 export async function PATCH(req: NextRequest) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   }
+  const body = parsed.body;
   const id = body.id;
   if (typeof id !== "string" || !isValidId(id)) {
     return NextResponse.json({ error: "valid id required" }, { status: 400 });
@@ -177,12 +177,11 @@ export async function DELETE(req: NextRequest) {
  * Re-scan a single business website for public contact info.
  */
 export async function POST(req: NextRequest) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   }
+  const body = parsed.body;
   if (body.action !== "scan" || typeof body.id !== "string" || !isValidId(body.id)) {
     return NextResponse.json({ error: "unsupported action" }, { status: 400 });
   }

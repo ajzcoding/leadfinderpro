@@ -7,6 +7,8 @@ import {
   isValidProvider,
   isValidSettingsAction,
   sanitizeApiKey,
+  rateLimit,
+  readJsonBody,
 } from "@/lib/security";
 
 /**
@@ -52,16 +54,11 @@ function maskKey(k: string): string {
  * character set + length range before storage.
  */
 export async function POST(req: NextRequest) {
-  let raw: unknown;
-  try {
-    raw = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   }
-  if (!raw || typeof raw !== "object") {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
-  const body = raw as Record<string, unknown>;
+  const body = parsed.body;
 
   const provider = body.provider;
   if (!isValidProvider(provider)) {
@@ -72,6 +69,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
   const p = provider as ProviderId;
+
+  // Rate-limit the "test" action (which makes outbound network calls) to
+  // prevent abuse: 6 tests per minute per client.
+  if (action === "test") {
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+    const rl = rateLimit(`settings-test:${ip}`, 6, 60_000);
+    if (!rl.ok) {
+      const res = NextResponse.json(
+        { ok: false, message: "Too many test requests. Please wait a moment." },
+        { status: 429 },
+      );
+      res.headers.set("Retry-After", String(Math.ceil(rl.retryAfterMs / 1000)));
+      return res;
+    }
+  }
 
   if (action === "save") {
     // API key: validate format if provided. null/empty clears it.

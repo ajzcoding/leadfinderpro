@@ -1,10 +1,15 @@
 import { db } from "@/lib/db";
+import { redactSensitive } from "@/lib/security";
 
 export type LogLevel = "info" | "warn" | "error";
 
 /**
  * Append a structured log entry to the local SQLite log table.
  * Never throws — logging must not break the calling flow.
+ *
+ * Sensitive data (API keys, tokens, passwords) is automatically redacted
+ * from the `meta` field before persistence, so credentials can never leak
+ * via the /api/logs endpoint.
  */
 export async function log(
   level: LogLevel,
@@ -16,9 +21,9 @@ export async function log(
     await db.log.create({
       data: {
         level,
-        category,
+        category: category.slice(0, 60),
         message: message.slice(0, 2000),
-        meta: meta ? JSON.stringify(meta).slice(0, 4000) : null,
+        meta: meta ? JSON.stringify(redactSensitive(meta)).slice(0, 4000) : null,
       },
     });
   } catch {

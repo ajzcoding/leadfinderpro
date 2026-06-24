@@ -1,5 +1,5 @@
 import { log } from "@/lib/logging";
-import { safePublicUrl } from "@/lib/security";
+import { safePublicUrl, safeFetchText } from "@/lib/security";
 import type { SocialLinks } from "@/lib/types";
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -28,31 +28,26 @@ async function getRobots(origin: string): Promise<{ allow: string[]; disallow: s
   const cached = robotsCache[origin];
   if (cached && Date.now() - cached.fetchedAt < ROBOTS_TTL) return cached.rules;
   const rules = { allow: [] as string[], disallow: [] as string[] };
-  try {
-    const res = await fetch(origin + "/robots.txt", {
-      signal: AbortSignal.timeout(SCAN_TIMEOUT_MS),
-      headers: { "User-Agent": "LeadFinderProBot/1.0 (+personal-use)" },
-      cache: "no-store",
-    });
-    if (res.ok) {
-      const text = await res.text();
-      let applies = true;
-      for (const line of text.split("\n")) {
-        const l = line.trim();
-        if (!l || l.startsWith("#")) continue;
-        const m = l.match(/^(User-agent|Allow|Disallow):\s*(.*)$/i);
-        if (!m) continue;
-        const [, key, val] = m;
-        if (key.toLowerCase() === "user-agent") {
-          applies = val === "*" || val.toLowerCase().includes("leadfinder");
-        } else if (applies) {
-          if (key.toLowerCase() === "allow") rules.allow.push(val);
-          if (key.toLowerCase() === "disallow") rules.disallow.push(val);
-        }
+  // Use safeFetchText for SSRF-proof redirects + response size cap.
+  const fetched = await safeFetchText(origin + "/robots.txt", {
+    timeoutMs: SCAN_TIMEOUT_MS,
+    acceptTypes: ["text/plain"],
+  });
+  if (fetched) {
+    let applies = true;
+    for (const line of fetched.text.split("\n")) {
+      const l = line.trim();
+      if (!l || l.startsWith("#")) continue;
+      const m = l.match(/^(User-agent|Allow|Disallow):\s*(.*)$/i);
+      if (!m) continue;
+      const [, key, val] = m;
+      if (key.toLowerCase() === "user-agent") {
+        applies = val === "*" || val.toLowerCase().includes("leadfinder");
+      } else if (applies) {
+        if (key.toLowerCase() === "allow") rules.allow.push(val);
+        if (key.toLowerCase() === "disallow") rules.disallow.push(val);
       }
     }
-  } catch {
-    // no robots.txt → assume allowed
   }
   robotsCache[origin] = { rules, fetchedAt: Date.now() };
   return rules;
@@ -122,23 +117,13 @@ function extractSocials(html: string, baseUrl: string): SocialLinks {
 }
 
 async function fetchPage(url: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(SCAN_TIMEOUT_MS),
-      headers: {
-        "User-Agent": "LeadFinderProBot/1.0 (+personal-use)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-      redirect: "follow",
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const ct = res.headers.get("content-type") ?? "";
-    if (!ct.includes("text/html") && !ct.includes("xhtml")) return null;
-    return await res.text();
-  } catch {
-    return null;
-  }
+  // safeFetchText handles SSRF-proof redirect validation, response size cap,
+  // content-type filtering, and timeout — all in one place.
+  const fetched = await safeFetchText(url, {
+    timeoutMs: SCAN_TIMEOUT_MS,
+    acceptTypes: ["text/html", "xhtml"],
+  });
+  return fetched?.text ?? null;
 }
 
 export interface ScanResult {

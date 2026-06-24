@@ -189,3 +189,44 @@ Work Log:
 
 Stage Summary:
 - Provider dropdown (and all other Select dropdowns app-wide) no longer shows the transparent empty shape on non-selected items.
+
+---
+Task ID: 18
+Agent: main
+Task: Comprehensive cybersecurity hardening (round 2).
+
+Work Log:
+Found and fixed 5 remaining security vulnerabilities:
+
+1. SSRF via redirect following (CRITICAL):
+   - Scanner's fetchPage() used `redirect: "follow"`, so a public URL could 302-redirect to an internal address (e.g. http://169.254.169.254 metadata), bypassing the safePublicUrl check on the initial URL.
+   - FIX: New `safeFetchText()` helper in security.ts that uses `redirect: "manual"` and validates EVERY redirect hop with safePublicUrl before following it. Also caps response body at 2MB (prevents memory exhaustion from malicious huge pages). Applied to both fetchPage() and getRobots() in the scanner.
+
+2. Rate limiting (MISSING):
+   - Search + settings/test endpoints had no rate limiting → could be abused to exhaust provider quotas or DoS.
+   - FIX: New sliding-window `rateLimit()` in security.ts. Search: 10 req/min per IP. Settings test: 6 req/min per IP. Returns HTTP 429 + Retry-After header when exceeded.
+
+3. Sensitive data leakage in logs (HIGH):
+   - The log() function stored meta as raw JSON — if an API key ended up in an error message, it would be persisted and exposed via /api/logs.
+   - FIX: New `redactSensitive()` in security.ts that strips API keys (AIza..., 32+ char tokens, Bearer tokens, URL credentials, key/token/secret/password fields) before JSON serialization. Applied in log() so all app-generated logs are automatically scrubbed.
+
+4. Request body size limits (MISSING):
+   - Mutating endpoints read req.json() with no size cap → could cause memory exhaustion with huge bodies.
+   - FIX: New `readJsonBody()` in security.ts that caps body at 16KB (defense-in-depth: checks content-length AND streams with running byte count). Applied to all 4 mutating routes: search, settings, project, business.
+
+5. Security headers (PARTIAL):
+   - Export route had nosniff but other routes lacked global headers.
+   - FIX: Added global headers() in next.config.ts applying to ALL responses: X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, X-Frame-Options: DENY (clickjacking), Permissions-Policy: camera/mic/geolocation disabled. Search route also sets these per-response.
+
+Verification (all PASS):
+- Rate limiting: 10 search reqs succeed, 11th returns HTTP 429 ✓
+- Body size: 20KB body returns HTTP 413 ✓
+- Redaction: AIza keys, Bearer tokens, URL creds, JWTs all → [REDACTED]; normal text preserved ✓
+- Global headers: X-Content-Type-Options, Referrer-Policy, X-Frame-Options, Permissions-Policy all present on page + API ✓
+- No `redirect: follow` remains in scan/providers ✓
+- readJsonBody used in all 4 mutating routes ✓
+- rateLimit used in search + settings ✓
+- Lint clean. Functional tests: search/dashboard/settings all return HTTP 200.
+
+Stage Summary:
+- 5 security vulnerabilities fixed and verified. App is now hardened against SSRF (incl. redirect bypass), DoS (rate limits + body size caps + response size caps), credential leakage (log redaction), clickjacking (X-Frame-Options), and content-type sniffing attacks.

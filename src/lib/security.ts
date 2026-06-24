@@ -144,3 +144,243 @@ export function isValidId(v: unknown): boolean {
 export function isValidExportFormat(v: unknown): v is "csv" | "xlsx" | "json" {
   return v === "csv" || v === "xlsx" || v === "json";
 }
+
+// ===========================================================================
+// Rate limiting (in-memory, sliding window)
+// ===========================================================================
+
+interface RateBucket {
+  /** timestamps (ms) of requests in the current window */
+  hits: number[];
+}
+
+const rateBuckets = new Map<string, RateBucket>();
+
+/**
+ * Returns true if the key is within its rate limit; false if exceeded.
+ * Uses a sliding window: requests older than `windowMs` are pruned.
+ */
+export function rateLimit(
+  key: string,
+  maxRequests: number,
+  windowMs: number,
+): { ok: boolean; retryAfterMs: number } {
+  const now = Date.now();
+  const bucket = rateBuckets.get(key) ?? { hits: [] };
+  // Prune old hits outside the window.
+  bucket.hits = bucket.hits.filter((t) => now - t < windowMs);
+  if (bucket.hits.length >= maxRequests) {
+    const oldest = bucket.hits[0];
+    return { ok: false, retryAfterMs: windowMs - (now - oldest) };
+  }
+  bucket.hits.push(now);
+  rateBuckets.set(key, bucket);
+  return { ok: true, retryAfterMs: 0 };
+}
+
+// ===========================================================================
+// Request body size validation
+// ===========================================================================
+
+/** Maximum accepted JSON body size (in bytes). */
+export const MAX_BODY_BYTES = 16 * 1024; // 16 KB — generous for search params
+
+/**
+ * Read + validate a JSON request body. Returns parsed JSON or an error
+ * response tuple. Enforces a max body size to prevent memory exhaustion.
+ */
+export async function readJsonBody<T = unknown>(
+  req: Request,
+): Promise<
+  | { ok: true; body: T }
+  | { ok: false; status: number; error: string }
+> {
+  const contentLength = req.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+    return { ok: false, status: 413, error: "Request body too large" };
+  }
+  let text: string;
+  try {
+    // Read with a size cap as defense-in-depth (content-length can be absent/spoofed).
+    const reader = req.body?.getReader();
+    if (!reader) {
+      text = await req.text();
+    } else {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_BODY_BYTES) {
+          reader.cancel();
+          return { ok: false, status: 413, error: "Request body too large" };
+        }
+        chunks.push(value);
+      }
+      text = new TextDecoder().decode(Buffer.concat(chunks));
+    }
+  } catch {
+    return { ok: false, status: 400, error: "Invalid request body" };
+  }
+  try {
+    return { ok: true, body: JSON.parse(text) as T };
+  } catch {
+    return { ok: false, status: 400, error: "Invalid JSON body" };
+  }
+}
+
+// ===========================================================================
+// Safe HTTP fetch (SSRF-proof redirect handling + response size cap)
+// ===========================================================================
+
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB cap on response bodies
+const MAX_REDIRECTS = 4;
+
+/**
+ * Fetch a URL safely: validates the initial URL AND every redirect target
+ * with safePublicUrl (prevents SSRF via redirect to internal addresses),
+ * and caps the response body size to prevent memory exhaustion.
+ *
+ * Returns the response body text + final URL, or null on any failure.
+ */
+export async function safeFetchText(
+  rawUrl: string,
+  opts?: {
+    method?: string;
+    headers?: Record<string, string>;
+    timeoutMs?: number;
+    acceptTypes?: string[]; // e.g. ["text/html"]; if set, response CT must match
+  },
+): Promise<{ text: string; finalUrl: string } | null> {
+  const timeoutMs = opts?.timeoutMs ?? 12000;
+  let currentUrl = safePublicUrl(rawUrl);
+  if (!currentUrl) return null;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    let res: Response;
+    try {
+      res = await fetch(currentUrl, {
+        method: opts?.method ?? "GET",
+        headers: {
+          "User-Agent": "LeadFinderProBot/1.0 (+personal-use)",
+          Accept: opts?.acceptTypes?.join(",") ?? "*/*",
+          ...(opts?.headers ?? {}),
+        },
+        redirect: "manual", // we handle redirects ourselves to validate each target
+        cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      return null;
+    }
+
+    // Handle redirects manually so we can validate the target.
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) return null;
+      let nextUrl: string;
+      try {
+        nextUrl = new URL(location, currentUrl).toString();
+      } catch {
+        return null;
+      }
+      // Validate the redirect target is a public URL (SSRF protection).
+      const validated = safePublicUrl(nextUrl);
+      if (!validated) return null;
+      currentUrl = validated;
+      continue;
+    }
+
+    if (!res.ok) return null;
+
+    // Validate content-type if an accept list was provided.
+    if (opts?.acceptTypes?.length) {
+      const ct = res.headers.get("content-type") ?? "";
+      if (!opts.acceptTypes.some((t) => ct.includes(t))) return null;
+    }
+
+    // Cap response body size. Read in chunks and abort if it exceeds the limit.
+    try {
+      const reader = res.body?.getReader();
+      if (!reader) {
+        const text = await res.text();
+        if (text.length > MAX_RESPONSE_BYTES) return null;
+        return { text, finalUrl: currentUrl };
+      }
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_RESPONSE_BYTES) {
+          reader.cancel();
+          return null;
+        }
+        chunks.push(value);
+      }
+      const text = new TextDecoder().decode(Buffer.concat(chunks));
+      return { text, finalUrl: currentUrl };
+    } catch {
+      return null;
+    }
+  }
+  return null; // too many redirects
+}
+
+// ===========================================================================
+// Sensitive-data redaction for logs
+// ===========================================================================
+
+// Patterns that look like API keys / tokens / credentials.
+const SENSITIVE_PATTERNS: RegExp[] = [
+  // Google API keys: AIza followed by 35 chars
+  /AIza[0-9A-Za-z_\-]{20,}/g,
+  // Generic long alphanumeric tokens (32+ chars, no spaces)
+  /[A-Za-z0-9_\-]{32,}/g,
+  // Bearer tokens
+  /Bearer\s+[A-Za-z0-9_\-\.]+/gi,
+  // Passwords in URLs: user:pass@host
+  /:\/\/[^/\s]+:[^/\s]+@/g,
+  // Authorization headers
+  /["']?(authorization|api[-_]?key|secret|token|password)["']?\s*[:=]\s*["']?[A-Za-z0-9_\-\.]{8,}["']?/gi,
+];
+
+/**
+ * Redact API-key-like and credential-like substrings from a value before it
+ * gets written to the log table. Recursively processes objects/arrays.
+ */
+export function redactSensitive(value: unknown): unknown {
+  if (typeof value === "string") {
+    let v = value;
+    for (const re of SENSITIVE_PATTERNS) {
+      v = v.replace(re, "[REDACTED]");
+    }
+    return v;
+  }
+  if (Array.isArray(value)) {
+    return value.map(redactSensitive);
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // Also redact known-sensitive keys entirely.
+      const lower = k.toLowerCase();
+      if (
+        lower.includes("key") ||
+        lower.includes("token") ||
+        lower.includes("secret") ||
+        lower.includes("password") ||
+        lower.includes("auth")
+      ) {
+        out[k] = "[REDACTED]";
+      } else {
+        out[k] = redactSensitive(v);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+

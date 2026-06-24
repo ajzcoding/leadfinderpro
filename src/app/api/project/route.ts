@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toBusinessRecord } from "@/lib/mappers";
-import { isValidId, sanitizeText } from "@/lib/security";
+import { isValidId, sanitizeText, readJsonBody } from "@/lib/security";
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
@@ -50,12 +50,11 @@ export async function GET(req: NextRequest) {
 
 /** POST /api/project  { name, description?, color? } */
 export async function POST(req: NextRequest) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   }
+  const body = parsed.body;
   const name = sanitizeText(body.name, 120);
   if (!name) {
     return NextResponse.json({ error: "name required (1–120 chars)" }, { status: 400 });
@@ -72,12 +71,11 @@ export async function POST(req: NextRequest) {
 
 /** PATCH /api/project  { id, name?, description?, color? } */
 export async function PATCH(req: NextRequest) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   }
+  const body = parsed.body;
   const id = body.id;
   if (typeof id !== "string" || !isValidId(id)) {
     return NextResponse.json({ error: "valid id required" }, { status: 400 });

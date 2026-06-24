@@ -9,9 +9,18 @@ import {
   sanitizeRadius,
   sanitizeLimit,
   isValidId,
+  rateLimit,
+  readJsonBody,
 } from "@/lib/security";
 
 export const maxDuration = 120;
+
+/** Security headers applied to every response from this route. */
+function securityHeaders(res: NextResponse): NextResponse {
+  res.headers.set("X-Content-Type-Options", "nosniff");
+  res.headers.set("Referrer-Policy", "no-referrer");
+  return res;
+}
 
 /**
  * POST /api/search
@@ -19,20 +28,32 @@ export const maxDuration = 120;
  *
  * Executes a provider search, persists businesses (deduping by hash), records
  * search history, and (optionally) scans each website for public contact info.
+ *
+ * Rate-limited to 10 searches per minute to prevent provider-quota abuse.
  */
 export async function POST(req: NextRequest) {
-  let raw: unknown;
-  try {
-    raw = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  if (!raw || typeof raw !== "object") {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  // --- Rate limit (10 searches / minute, keyed by client IP) ---
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+  const rl = rateLimit(`search:${ip}`, 10, 60_000);
+  if (!rl.ok) {
+    const res = NextResponse.json(
+      { error: "Too many searches. Please slow down." },
+      { status: 429 },
+    );
+    res.headers.set("Retry-After", String(Math.ceil(rl.retryAfterMs / 1000)));
+    return securityHeaders(res);
   }
 
+  // --- Read + validate body (size-limited) ---
+  const parsed = await readJsonBody<Record<string, unknown>>(req);
+  if (!parsed.ok) {
+    return securityHeaders(
+      NextResponse.json({ error: parsed.error }, { status: parsed.status }),
+    );
+  }
+  const body = parsed.body;
+
   // --- Validate + sanitize every input field ---
-  const body = raw as Record<string, unknown>;
   const params = {
     country: sanitizeText(body.country),
     state: sanitizeText(body.state),
@@ -51,9 +72,11 @@ export async function POST(req: NextRequest) {
 
   // Require at least one location field or a keyword.
   if (!params.country && !params.state && !params.city && !params.keyword) {
-    return NextResponse.json(
-      { error: "Provide at least a location or a keyword to search." },
-      { status: 400 },
+    return securityHeaders(
+      NextResponse.json(
+        { error: "Provide at least a location or a keyword to search." },
+        { status: 400 },
+      ),
     );
   }
 
@@ -71,14 +94,16 @@ export async function POST(req: NextRequest) {
         totalResults: 0,
       },
     });
-    return NextResponse.json({
-      searchHistoryId: sh.id,
-      totalResults: 0,
-      businesses: [],
-      center: center
-        ? { lat: center.lat, lng: center.lng, displayName: center.displayName }
-        : null,
-    });
+    return securityHeaders(
+      NextResponse.json({
+        searchHistoryId: sh.id,
+        totalResults: 0,
+        businesses: [],
+        center: center
+          ? { lat: center.lat, lng: center.lng, displayName: center.displayName }
+          : null,
+      }),
+    );
   }
 
   // Persist search history first.
@@ -101,7 +126,6 @@ export async function POST(req: NextRequest) {
     const hash = hashBusiness(r);
     const existing = await db.business.findUnique({ where: { hashKey: hash } });
     if (existing) {
-      // Merge socialLinks safely (both sides are already JSON strings).
       let mergedSocials = existing.socialLinks;
       if (r.socialLinks && Object.keys(r.socialLinks).length) {
         try {
@@ -154,7 +178,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Optional website scanning (SSRF-safe URLs already enforced upstream).
+  // Optional website scanning (SSRF-safe URLs enforced by safeFetchText).
   if (params.scanWebsites) {
     await log("info", "search", `Scanning ${saved.length} websites…`);
     for (const b of saved) {
@@ -181,12 +205,14 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({
-    searchHistoryId: searchHistory.id,
-    totalResults: saved.length,
-    businesses: saved,
-    center: center
-      ? { lat: center.lat, lng: center.lng, displayName: center.displayName }
-      : null,
-  });
+  return securityHeaders(
+    NextResponse.json({
+      searchHistoryId: searchHistory.id,
+      totalResults: saved.length,
+      businesses: saved,
+      center: center
+        ? { lat: center.lat, lng: center.lng, displayName: center.displayName }
+        : null,
+    }),
+  );
 }
