@@ -78,7 +78,7 @@ git --version    # should print 2.x or higher
 ### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/lead-finder-pro.git
+git clone https://github.com/ajzcoding/leadfinderpro.git
 cd lead-finder-pro
 ```
 
